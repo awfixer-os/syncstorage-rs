@@ -1,7 +1,6 @@
 //! Parameter types for database methods.
 use core::fmt;
 use std::{
-    collections::HashMap,
     fmt::{Display, Formatter},
     num::ParseIntError,
     str::FromStr,
@@ -130,7 +129,6 @@ collection_data! {
     PostBsos {
         bsos: Vec<PostCollectionBso>,
         for_batch: bool,
-        failed: HashMap<String, String>,
     },
 
     CreateBatch {
@@ -199,10 +197,6 @@ pub struct PostCollectionBso {
     // ttl in seconds
     pub ttl: Option<u32>,
 }
-
-pub type GetCollectionId = String;
-
-pub type CreateCollection = String;
 
 data! {
     UpdateCollection {

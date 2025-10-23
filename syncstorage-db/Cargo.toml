@@ -6,13 +6,12 @@ authors.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 env_logger.workspace = true
-futures.workspace = true
 lazy_static.workspace = true
 rand.workspace = true
 slog-scope.workspace = true
 
-async-trait = "0.1.88"
 log = { version = "0.4", features = [
     "max_level_debug",
     "release_max_level_info",
@@ -22,10 +21,12 @@ syncserver-db-common = { path = "../syncserver-db-common" }
 syncserver-settings = { path = "../syncserver-settings" }
 syncstorage-db-common = { path = "../syncstorage-db-common" }
 syncstorage-mysql = { path = "../syncstorage-mysql", optional = true }
+syncstorage-postgres = { path = "../syncstorage-postgres", optional = true }
 syncstorage-settings = { path = "../syncstorage-settings" }
 syncstorage-spanner = { path = "../syncstorage-spanner", optional = true }
 tokio = { workspace = true, features = ["macros", "sync"] }
 
 [features]
 mysql = ['syncstorage-mysql']
+postgres = ['syncstorage-postgres']
 spanner = ['syncstorage-spanner']

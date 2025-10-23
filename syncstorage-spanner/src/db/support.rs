@@ -13,7 +13,7 @@ use syncstorage_db_common::{
     params, results, util::to_rfc3339, util::SyncTimestamp, UserIdentifier, DEFAULT_BSO_TTL,
 };
 
-pub use crate::stream::StreamedResultSetAsync;
+pub use super::stream::StreamedResultSetAsync;
 use crate::{error::DbError, pool::Conn, DbResult};
 
 pub trait IntoSpannerValue {
@@ -160,7 +160,7 @@ impl ExecuteSqlRequestBuilder {
     }
 
     /// Execute a SQL read statement but return a non-blocking streaming result
-    pub fn execute_async(self, conn: &Conn) -> DbResult<StreamedResultSetAsync> {
+    pub fn execute(self, conn: &Conn) -> DbResult<StreamedResultSetAsync> {
         let stream = conn
             .client
             .execute_streaming_sql_opt(&self.prepare_request(conn), conn.session_opt()?)?;
@@ -168,7 +168,7 @@ impl ExecuteSqlRequestBuilder {
     }
 
     /// Execute a DML statement, returning the exact count of modified rows
-    pub async fn execute_dml_async(self, conn: &Conn) -> DbResult<i64> {
+    pub async fn execute_dml(self, conn: &Conn) -> DbResult<i64> {
         let rs = conn
             .client
             .execute_sql_async_opt(&self.prepare_request(conn), conn.session_opt()?)?

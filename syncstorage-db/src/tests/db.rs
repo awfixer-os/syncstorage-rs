@@ -21,7 +21,7 @@ lazy_static! {
 #[tokio::test]
 async fn bso_successfully_updates_single_values() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -62,7 +62,7 @@ async fn bso_successfully_updates_single_values() -> Result<(), DbError> {
 #[tokio::test]
 async fn bso_modified_not_changed_on_ttl_touch() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -85,7 +85,7 @@ async fn bso_modified_not_changed_on_ttl_touch() -> Result<(), DbError> {
 #[tokio::test]
 async fn put_bso_updates() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -108,7 +108,7 @@ async fn put_bso_updates() -> Result<(), DbError> {
 #[tokio::test]
 async fn get_bsos_limit_offset() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -122,7 +122,7 @@ async fn get_bsos_limit_offset() -> Result<(), DbError> {
             Some(i),
             Some(DEFAULT_BSO_TTL),
         );
-        with_delta!(&db, i64::from(i) * 10, { db.put_bso(bso).await })?;
+        with_delta!(&mut db, i64::from(i) * 10, { db.put_bso(bso).await })?;
     }
 
     let bsos = db
@@ -160,7 +160,7 @@ async fn get_bsos_limit_offset() -> Result<(), DbError> {
     let offset = "0".to_owned();
     // XXX: validation?
     /*
-    let bsos = db.get_bsos_sync(gbsos(uid, coll, &[], MAX_TIMESTAMP, 0, Sorting::Index, -1, 0))?;
+    let bsos = db.get_bsos(gbsos(uid, coll, &[], MAX_TIMESTAMP, 0, Sorting::Index, -1, 0))?;
     .. etc
     */
 
@@ -229,7 +229,7 @@ async fn get_bsos_limit_offset() -> Result<(), DbError> {
 #[tokio::test]
 async fn get_bsos_newer() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -244,7 +244,7 @@ async fn get_bsos_newer() -> Result<(), DbError> {
             Some(1),
             Some(DEFAULT_BSO_TTL),
         );
-        with_delta!(&db, -i * 10, { db.put_bso(pbso).await })?;
+        with_delta!(&mut db, -i * 10, { db.put_bso(pbso).await })?;
     }
 
     let bsos = db
@@ -314,7 +314,7 @@ async fn get_bsos_newer() -> Result<(), DbError> {
 #[tokio::test]
 async fn get_bsos_sort() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -328,7 +328,7 @@ async fn get_bsos_sort() -> Result<(), DbError> {
             Some(*sortindex),
             Some(DEFAULT_BSO_TTL),
         );
-        with_delta!(&db, -(revi as i64) * 10, { db.put_bso(pbso).await })?;
+        with_delta!(&mut db, -(revi as i64) * 10, { db.put_bso(pbso).await })?;
     }
 
     let bsos = db
@@ -387,7 +387,7 @@ async fn get_bsos_sort() -> Result<(), DbError> {
 #[tokio::test]
 async fn delete_bsos_in_correct_collection() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let payload = "data";
@@ -404,14 +404,14 @@ async fn delete_bsos_in_correct_collection() -> Result<(), DbError> {
 #[tokio::test]
 async fn get_storage_timestamp() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
-    db.create_collection("NewCollection1".to_owned()).await?;
-    let col2 = db.create_collection("NewCollection2".to_owned()).await?;
-    db.create_collection("NewCollection3".to_owned()).await?;
+    db.create_collection("NewCollection1").await?;
+    let col2 = db.create_collection("NewCollection2").await?;
+    db.create_collection("NewCollection3").await?;
 
-    with_delta!(&db, 100_000, {
+    with_delta!(&mut db, 100_000, {
         db.update_collection(params::UpdateCollection {
             user_id: hid(uid),
             collection_id: col2,
@@ -427,20 +427,20 @@ async fn get_storage_timestamp() -> Result<(), DbError> {
 #[tokio::test]
 async fn get_collection_id() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
-    db.get_collection_id("bookmarks".to_owned()).await?;
+    let mut db = test_db(pool).await?;
+    db.get_collection_id("bookmarks").await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn create_collection() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let name = "NewCollection";
-    let cid = db.create_collection(name.to_owned()).await?;
+    let cid = db.create_collection(name).await?;
     assert_ne!(cid, 0);
-    let cid2 = db.get_collection_id(name.to_owned()).await?;
+    let cid2 = db.get_collection_id(name).await?;
     assert_eq!(cid2, cid);
     Ok(())
 }
@@ -448,10 +448,10 @@ async fn create_collection() -> Result<(), DbError> {
 #[tokio::test]
 async fn update_collection() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
     let collection = "test".to_owned();
 
-    let cid = db.create_collection(collection.clone()).await?;
+    let cid = db.create_collection(&collection).await?;
     db.update_collection(params::UpdateCollection {
         user_id: hid(1),
         collection_id: cid,
@@ -464,7 +464,7 @@ async fn update_collection() -> Result<(), DbError> {
 #[tokio::test]
 async fn delete_collection() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "NewCollection";
@@ -500,7 +500,7 @@ async fn delete_collection() -> Result<(), DbError> {
 #[tokio::test]
 async fn delete_collection_tombstone() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "test";
@@ -560,49 +560,49 @@ async fn delete_collection_tombstone() -> Result<(), DbError> {
 #[tokio::test]
 async fn get_collection_timestamps() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
-    let coll = "test".to_owned();
-    let cid = db.create_collection(coll.clone()).await?;
+    let coll = "test";
+    let cid = db.create_collection(coll).await?;
     db.update_collection(params::UpdateCollection {
         user_id: hid(uid),
         collection_id: cid,
-        collection: coll.clone(),
+        collection: coll.to_owned(),
     })
     .await?;
     let cols = db.get_collection_timestamps(hid(uid)).await?;
-    assert!(cols.contains_key(&coll));
-    assert_eq!(cols.get(&coll), Some(&db.timestamp()));
+    assert!(cols.contains_key(coll));
+    assert_eq!(cols.get(coll), Some(&db.timestamp()));
 
     let ts = db
         .get_collection_timestamp(params::GetCollectionTimestamp {
             user_id: hid(uid),
-            collection: coll.clone(),
+            collection: coll.to_owned(),
         })
         .await?;
-    assert_eq!(Some(&ts), cols.get(&coll));
+    assert_eq!(Some(&ts), cols.get(coll));
     Ok(())
 }
 
 #[tokio::test]
 async fn get_collection_timestamps_tombstone() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
-    let coll = "test".to_owned();
-    let cid = db.create_collection(coll.clone()).await?;
+    let coll = "test";
+    let cid = db.create_collection(coll).await?;
     db.update_collection(params::UpdateCollection {
         user_id: hid(uid),
         collection_id: cid,
-        collection: coll.clone(),
+        collection: coll.to_owned(),
     })
     .await?;
 
     db.delete_collection(params::DeleteCollection {
         user_id: hid(uid),
-        collection: coll,
+        collection: coll.to_owned(),
     })
     .await?;
     let cols = db.get_collection_timestamps(hid(uid)).await?;
@@ -613,7 +613,7 @@ async fn get_collection_timestamps_tombstone() -> Result<(), DbError> {
 #[tokio::test]
 async fn get_collection_usage() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let mut expected = HashMap::new();
@@ -645,7 +645,7 @@ async fn get_collection_usage() -> Result<(), DbError> {
     assert_eq!(total, sum as u64);
     let settings = Settings::test_settings();
     if settings.syncstorage.enable_quota {
-        let collection_id = db.get_collection_id("bookmarks".to_owned()).await?;
+        let collection_id = db.get_collection_id("bookmarks").await?;
         let quota = db
             .get_quota_usage(params::GetQuotaUsage {
                 user_id: hid(uid),
@@ -707,7 +707,7 @@ async fn test_quota() -> Result<(), DbError> {
 #[tokio::test]
 async fn get_collection_counts() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let mut expected = HashMap::new();
@@ -730,7 +730,7 @@ async fn get_collection_counts() -> Result<(), DbError> {
 #[tokio::test]
 async fn put_bso() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "NewCollection";
@@ -750,7 +750,7 @@ async fn put_bso() -> Result<(), DbError> {
     assert_eq!(bso.sortindex, Some(1));
 
     let bso2 = pbso(uid, coll, bid, Some("bar"), Some(2), Some(DEFAULT_BSO_TTL));
-    with_delta!(&db, 19, {
+    with_delta!(&mut db, 19, {
         db.put_bso(bso2).await?;
         let ts = db
             .get_collection_timestamp(params::GetCollectionTimestamp {
@@ -770,7 +770,7 @@ async fn put_bso() -> Result<(), DbError> {
 #[tokio::test]
 async fn post_bsos() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "NewCollection";
@@ -784,15 +784,8 @@ async fn post_bsos() -> Result<(), DbError> {
                 postbso("b2", Some("payload 2"), Some(100), None),
             ],
             for_batch: false,
-            failed: Default::default(),
         })
         .await?;
-
-    assert!(result.success.contains(&"b0".to_owned()));
-    assert!(result.success.contains(&"b2".to_owned()));
-    // NOTE: b1 exceeds BSO_MAX_TTL but the database layer doesn't validate.
-    // This is the extractor's responsibility
-    //assert!(!result.success.contains(&"b1".to_owned()));
 
     let ts = db
         .get_collection_timestamp(params::GetCollectionTimestamp {
@@ -801,7 +794,7 @@ async fn post_bsos() -> Result<(), DbError> {
         })
         .await?;
     // XXX: casts
-    assert_eq!(result.modified, ts);
+    assert_eq!(result, ts);
 
     let result2 = db
         .post_bsos(params::PostBsos {
@@ -812,14 +805,8 @@ async fn post_bsos() -> Result<(), DbError> {
                 postbso("b2", Some("updated 2"), Some(22), Some(10000)),
             ],
             for_batch: false,
-            failed: Default::default(),
         })
         .await?;
-
-    assert_eq!(result2.success.len(), 2);
-    assert_eq!(result2.failed.len(), 0);
-    assert!(result2.success.contains(&"b0".to_owned()));
-    assert!(result2.success.contains(&"b2".to_owned()));
 
     let bso = db.get_bso(gbso(uid, coll, "b0")).await?.unwrap();
     assert_eq!(bso.sortindex, Some(11));
@@ -834,14 +821,14 @@ async fn post_bsos() -> Result<(), DbError> {
             collection: coll.to_string(),
         })
         .await?;
-    assert_eq!(result2.modified, ts);
+    assert_eq!(result2, ts);
     Ok(())
 }
 
 #[tokio::test]
 async fn get_bso() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -862,7 +849,7 @@ async fn get_bso() -> Result<(), DbError> {
 #[tokio::test]
 async fn get_bsos() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -877,7 +864,7 @@ async fn get_bsos() -> Result<(), DbError> {
             Some(*sortindex),
             None,
         );
-        with_delta!(&db, i as i64 * 10, { db.put_bso(bso).await })?;
+        with_delta!(&mut db, i as i64 * 10, { db.put_bso(bso).await })?;
     }
 
     let ids = db
@@ -933,7 +920,7 @@ async fn get_bsos() -> Result<(), DbError> {
 #[tokio::test]
 async fn get_bso_timestamp() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -954,7 +941,7 @@ async fn get_bso_timestamp() -> Result<(), DbError> {
 #[tokio::test]
 async fn delete_bso() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -970,7 +957,7 @@ async fn delete_bso() -> Result<(), DbError> {
 #[tokio::test]
 async fn delete_bsos() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -1005,21 +992,21 @@ async fn delete_bsos() -> Result<(), DbError> {
 #[tokio::test]
 async fn usage_stats() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn purge_expired() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn optimize() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
     Ok(())
 }
 */
@@ -1027,12 +1014,12 @@ async fn optimize() -> Result<(), DbError> {
 #[tokio::test]
 async fn delete_storage() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let bid = "test";
     let coll = "my_collection";
-    let cid = db.create_collection(coll.to_owned()).await?;
+    let cid = db.create_collection(coll).await?;
     db.put_bso(pbso(uid, coll, bid, Some("test"), None, None))
         .await?;
 
@@ -1041,7 +1028,7 @@ async fn delete_storage() -> Result<(), DbError> {
     assert!(result.is_none());
 
     // collection data sticks around
-    let cid2 = db.get_collection_id("my_collection".to_owned()).await?;
+    let cid2 = db.get_collection_id("my_collection").await?;
     assert_eq!(cid2, cid);
 
     let collections = db.get_collection_counts(hid(uid)).await?;
@@ -1053,11 +1040,11 @@ async fn delete_storage() -> Result<(), DbError> {
 #[tokio::test]
 async fn collection_cache() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "test";
-    let cid = db.create_collection(coll.to_owned()).await?;
+    let cid = db.create_collection(coll).await?;
     db.update_collection(params::UpdateCollection {
         user_id: hid(uid),
         collection_id: cid,
@@ -1074,7 +1061,7 @@ async fn collection_cache() -> Result<(), DbError> {
 #[tokio::test]
 async fn lock_for_read() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -1083,7 +1070,7 @@ async fn lock_for_read() -> Result<(), DbError> {
         collection: coll.to_owned(),
     })
     .await?;
-    let result = db.get_collection_id("NewCollection".to_owned()).await;
+    let result = db.get_collection_id("NewCollection").await;
     assert!(result.unwrap_err().is_collection_not_found());
     db.commit().await?;
     Ok(())
@@ -1092,7 +1079,7 @@ async fn lock_for_read() -> Result<(), DbError> {
 #[tokio::test]
 async fn lock_for_write() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     let uid = *UID;
     let coll = "clients";
@@ -1110,7 +1097,7 @@ async fn lock_for_write() -> Result<(), DbError> {
 #[tokio::test]
 async fn heartbeat() -> Result<(), DbError> {
     let pool = db_pool(None).await?;
-    let db = test_db(pool).await?;
+    let mut db = test_db(pool).await?;
 
     assert!(db.check().await?);
     Ok(())

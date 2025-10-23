@@ -7,19 +7,19 @@ use serde::{Deserialize, Serialize};
 /// Represents a user record as it is stored in the database.
 #[derive(Clone, Debug, Default, Deserialize, QueryableByName, Serialize)]
 pub struct GetRawUser {
-    #[sql_type = "Bigint"]
+    #[diesel(sql_type = Bigint)]
     pub uid: i64,
-    #[sql_type = "Text"]
+    #[diesel(sql_type = Text)]
     pub client_state: String,
-    #[sql_type = "Bigint"]
+    #[diesel(sql_type = Bigint)]
     pub generation: i64,
-    #[sql_type = "Nullable<Text>"]
+    #[diesel(sql_type = Nullable<Text>)]
     pub node: Option<String>,
-    #[sql_type = "Nullable<Bigint>"]
+    #[diesel(sql_type = Nullable<Bigint>)]
     pub keys_changed_at: Option<i64>,
-    #[sql_type = "Bigint"]
+    #[diesel(sql_type = Bigint)]
     pub created_at: i64,
-    #[sql_type = "Nullable<Bigint>"]
+    #[diesel(sql_type = Nullable<Bigint>)]
     pub replaced_at: Option<i64>,
 }
 
@@ -50,27 +50,26 @@ pub struct GetOrCreateUser {
 }
 
 #[derive(Default, QueryableByName)]
-pub struct LastInsertId {
-    #[sql_type = "Bigint"]
-    pub id: i64,
+pub struct PostUser {
+    #[diesel(sql_type = Bigint)]
+    pub uid: i64,
 }
 
-pub type PostUser = LastInsertId;
 pub type ReplaceUsers = ();
 pub type ReplaceUser = ();
 pub type PutUser = ();
 
 #[derive(Default, QueryableByName)]
 pub struct GetNodeId {
-    #[sql_type = "Bigint"]
+    #[diesel(sql_type = Bigint)]
     pub id: i64,
 }
 
 #[derive(Default, QueryableByName)]
 pub struct GetBestNode {
-    #[sql_type = "Bigint"]
+    #[diesel(sql_type = Bigint)]
     pub id: i64,
-    #[sql_type = "Text"]
+    #[diesel(sql_type = Text)]
     pub node: String,
 }
 
@@ -78,73 +77,77 @@ pub type AddUserToNode = ();
 
 #[derive(Default, QueryableByName)]
 pub struct GetServiceId {
-    #[sql_type = "Integer"]
+    #[diesel(sql_type = Integer)]
     pub id: i32,
 }
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 #[derive(Debug, Default, Eq, PartialEq, QueryableByName)]
 pub struct GetUser {
-    #[sql_type = "Integer"]
-    #[column_name = "service"]
+    #[diesel(sql_type = Integer)]
+    #[diesel(column_name = service)]
     pub service_id: i32,
-    #[sql_type = "Text"]
+    #[diesel(sql_type = Text)]
     pub email: String,
-    #[sql_type = "Bigint"]
+    #[diesel(sql_type = Bigint)]
     pub generation: i64,
-    #[sql_type = "Text"]
+    #[diesel(sql_type = Text)]
     pub client_state: String,
-    #[sql_type = "Nullable<Bigint>"]
+    #[diesel(sql_type = Nullable<Bigint>)]
     pub replaced_at: Option<i64>,
-    #[sql_type = "Bigint"]
-    #[column_name = "nodeid"]
+    #[diesel(sql_type = Bigint)]
+    #[diesel(column_name = nodeid)]
     pub node_id: i64,
-    #[sql_type = "Nullable<Bigint>"]
+    #[diesel(sql_type = Nullable<Bigint>)]
     pub keys_changed_at: Option<i64>,
 }
 
-#[cfg(test)]
-pub type PostNode = LastInsertId;
+#[cfg(debug_assertions)]
+#[derive(Default, QueryableByName)]
+pub struct PostNode {
+    #[diesel(sql_type = Bigint)]
+    pub id: i64,
+}
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 #[derive(Default, QueryableByName)]
 pub struct GetNode {
-    #[sql_type = "Bigint"]
+    #[diesel(sql_type = Bigint)]
     pub id: i64,
-    #[sql_type = "Integer"]
-    #[column_name = "service"]
+    #[diesel(sql_type = Integer)]
+    #[diesel(column_name = service)]
     pub service_id: i32,
-    #[sql_type = "Text"]
+    #[diesel(sql_type = Text)]
     pub node: String,
-    #[sql_type = "Integer"]
+    #[diesel(sql_type = Integer)]
     pub available: i32,
-    #[sql_type = "Integer"]
+    #[diesel(sql_type = Integer)]
     pub current_load: i32,
-    #[sql_type = "Integer"]
+    #[diesel(sql_type = Integer)]
     pub capacity: i32,
-    #[sql_type = "Integer"]
+    #[diesel(sql_type = Integer)]
     pub downed: i32,
-    #[sql_type = "Integer"]
+    #[diesel(sql_type = Integer)]
     pub backoff: i32,
 }
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 #[derive(Default, QueryableByName)]
 pub struct PostService {
-    #[sql_type = "Integer"]
+    #[diesel(sql_type = Integer)]
     pub id: i32,
 }
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 pub type SetUserCreatedAt = ();
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 pub type SetUserReplacedAt = ();
 
 pub type Check = bool;
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 pub type UnassignNode = ();
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 pub type RemoveNode = ();

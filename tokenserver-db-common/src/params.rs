@@ -23,8 +23,8 @@ pub struct PostService {
 }
 
 pub struct GetUsers {
-    pub service_id: i32,
     pub email: String,
+    pub service_id: i32,
 }
 
 #[derive(Clone, Default)]
@@ -96,30 +96,33 @@ pub struct GetServiceId {
     pub service: String,
 }
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 pub struct SetUserCreatedAt {
-    pub uid: i64,
     pub created_at: i64,
-}
-
-#[cfg(test)]
-pub struct SetUserReplacedAt {
     pub uid: i64,
-    pub replaced_at: i64,
 }
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
+pub struct SetUserReplacedAt {
+    pub replaced_at: i64,
+    pub uid: i64,
+}
+
+#[cfg(debug_assertions)]
 #[derive(Default)]
 pub struct GetUser {
     pub id: i64,
 }
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 pub struct UnassignNode {
     pub node_id: i64,
 }
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 pub struct RemoveNode {
     pub node_id: i64,
 }
+
+#[cfg(debug_assertions)]
+pub type SpannerNodeId = Option<i32>;

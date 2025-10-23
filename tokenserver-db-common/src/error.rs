@@ -1,14 +1,12 @@
 use std::fmt;
 
 use backtrace::Backtrace;
+use deadpool::managed::PoolError;
 use http::StatusCode;
 use syncserver_common::{from_error, impl_fmt_display, InternalError, ReportableError};
 use syncserver_db_common::error::SqlError;
 use thiserror::Error;
 use tokenserver_common::TokenserverError;
-
-pub(crate) type DbFuture<'a, T> = syncserver_db_common::DbFuture<'a, T, DbError>;
-pub(crate) type DbResult<T> = Result<T, DbError>;
 
 /// An error type that represents any database-related errors that may occur while processing a
 /// tokenserver request.
@@ -20,8 +18,12 @@ pub struct DbError {
 }
 
 impl DbError {
-    pub(crate) fn internal(msg: String) -> Self {
+    pub fn internal(msg: String) -> Self {
         DbErrorKind::Internal(msg).into()
+    }
+
+    pub fn pool_timeout(timeout_type: deadpool::managed::TimeoutType) -> Self {
+        DbErrorKind::PoolTimeout(timeout_type).into()
     }
 }
 
@@ -36,6 +38,7 @@ impl ReportableError for DbError {
     fn is_sentry_event(&self) -> bool {
         match &self.kind {
             DbErrorKind::Sql(e) => e.is_sentry_event(),
+            DbErrorKind::PoolTimeout(_) => false,
             _ => true,
         }
     }
@@ -43,6 +46,7 @@ impl ReportableError for DbError {
     fn metric_label(&self) -> Option<&str> {
         match &self.kind {
             DbErrorKind::Sql(e) => e.metric_label(),
+            DbErrorKind::PoolTimeout(_) => Some("storage.pool.timeout"),
             _ => None,
         }
     }
@@ -55,17 +59,20 @@ enum DbErrorKind {
 
     #[error("Unexpected error: {}", _0)]
     Internal(String),
+
+    #[error("A database pool timeout occurred, type: {:?}", _0)]
+    PoolTimeout(deadpool::managed::TimeoutType),
 }
 
 impl From<DbErrorKind> for DbError {
     fn from(kind: DbErrorKind) -> Self {
         match kind {
-            DbErrorKind::Sql(ref mysql_error) => Self {
-                status: mysql_error.status,
-                backtrace: Box::new(mysql_error.backtrace.clone()),
+            DbErrorKind::Sql(ref sqle) => Self {
+                status: sqle.status,
+                backtrace: Box::new(sqle.backtrace.clone()),
                 kind,
             },
-            DbErrorKind::Internal(_) => Self {
+            _ => Self {
                 kind,
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 backtrace: Box::new(Backtrace::new()),
@@ -113,14 +120,27 @@ from_error!(
     |error: diesel::result::ConnectionError| DbError::from(DbErrorKind::Sql(SqlError::from(error)))
 );
 from_error!(
-    diesel::r2d2::PoolError,
+    diesel_migrations::MigrationError,
     DbError,
-    |error: diesel::r2d2::PoolError| DbError::from(DbErrorKind::Sql(SqlError::from(error)))
-);
-from_error!(
-    diesel_migrations::RunMigrationsError,
-    DbError,
-    |error: diesel_migrations::RunMigrationsError| DbError::from(DbErrorKind::Sql(SqlError::from(
+    |error: diesel_migrations::MigrationError| DbError::from(DbErrorKind::Sql(SqlError::from(
         error
     )))
 );
+from_error!(
+    std::boxed::Box<dyn std::error::Error + std::marker::Send + Sync>,
+    DbError,
+    |error: std::boxed::Box<dyn std::error::Error>| DbError::internal_error(error.to_string())
+);
+
+impl From<PoolError<diesel_async::pooled_connection::PoolError>> for DbError {
+    fn from(pe: PoolError<diesel_async::pooled_connection::PoolError>) -> DbError {
+        match pe {
+            PoolError::Backend(be) => match be {
+                diesel_async::pooled_connection::PoolError::ConnectionError(ce) => ce.into(),
+                diesel_async::pooled_connection::PoolError::QueryError(dbe) => dbe.into(),
+            },
+            PoolError::Timeout(timeout_type) => DbError::pool_timeout(timeout_type),
+            _ => DbError::internal(format!("deadpool PoolError: {pe}")),
+        }
+    }
+}

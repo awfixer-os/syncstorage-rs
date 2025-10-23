@@ -1,7 +1,6 @@
 #![allow(non_local_definitions)]
 #[macro_use]
 extern crate diesel;
-#[macro_use]
 extern crate diesel_migrations;
 #[macro_use]
 extern crate slog_scope;
@@ -9,15 +8,14 @@ extern crate slog_scope;
 #[macro_use]
 mod batch;
 mod diesel_ext;
-mod error;
 mod models;
 mod pool;
 mod schema;
 #[cfg(test)]
 mod test;
 
-pub use error::DbError;
 pub use models::MysqlDb;
 pub use pool::MysqlDbPool;
+pub use syncstorage_db_common::diesel::DbError;
 
-pub(crate) type DbResult<T> = Result<T, error::DbError>;
+pub(crate) type DbResult<T> = Result<T, DbError>;

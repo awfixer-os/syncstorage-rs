@@ -22,11 +22,8 @@ enum SqlErrorKind {
     #[error("An error occurred while establishing a db connection: {}", _0)]
     DieselConnection(#[from] diesel::result::ConnectionError),
 
-    #[error("A database pool error occurred: {}", _0)]
-    Pool(diesel::r2d2::PoolError),
-
     #[error("Error migrating the database: {}", _0)]
-    Migration(diesel_migrations::RunMigrationsError),
+    Migration(diesel_migrations::MigrationError),
 }
 
 impl From<SqlErrorKind> for SqlError {
@@ -41,18 +38,13 @@ impl From<SqlErrorKind> for SqlError {
 
 impl ReportableError for SqlError {
     fn is_sentry_event(&self) -> bool {
-        #[allow(clippy::match_like_matches_macro)]
-        match &self.kind {
-            SqlErrorKind::Pool(_) => false,
-            _ => true,
-        }
+        true
     }
 
     fn metric_label(&self) -> Option<&'static str> {
         Some(match self.kind {
             SqlErrorKind::DieselQuery(_) => "storage.sql.error.diesel_query",
             SqlErrorKind::DieselConnection(_) => "storage.sql.error.diesel_connection",
-            SqlErrorKind::Pool(_) => "storage.sql.error.pool",
             SqlErrorKind::Migration(_) => "storage.sql.error.migration",
         })
     }
@@ -70,9 +62,8 @@ from_error!(
     SqlError,
     SqlErrorKind::DieselConnection
 );
-from_error!(diesel::r2d2::PoolError, SqlError, SqlErrorKind::Pool);
 from_error!(
-    diesel_migrations::RunMigrationsError,
+    diesel_migrations::MigrationError,
     SqlError,
     SqlErrorKind::Migration
 );
