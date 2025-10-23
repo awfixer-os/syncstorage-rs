@@ -6,17 +6,17 @@ authors.workspace = true
 edition.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 backtrace.workspace = true
 chrono.workspace = true
-futures.workspace = true
-lazy_static.workspace = true
+deadpool.workspace = true
+diesel.workspace = true
+diesel_migrations.workspace = true
 http.workspace = true
+lazy_static.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
-async-trait = "0.1.88"
-# diesel = 1.4
-diesel = { workspace = true, features = ["mysql", "r2d2"] }
 syncserver-common = { path = "../syncserver-common" }
 syncserver-db-common = { path = "../syncserver-db-common" }

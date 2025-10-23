@@ -268,11 +268,12 @@ impl Server {
         let blocking_threadpool = Arc::new(BlockingThreadpool::new(
             settings.worker_max_blocking_threads,
         ));
-        let db_pool = DbPoolImpl::new(
+        let mut db_pool = DbPoolImpl::new(
             &settings.syncstorage,
             &Metrics::from(&metrics),
             blocking_threadpool.clone(),
         )?;
+        db_pool.init().await?;
         // Spawns sweeper that calls Deadpool `retain` method, clearing unused connections.
         db_pool.spawn_sweeper(Duration::from_secs(
             settings
@@ -297,7 +298,7 @@ impl Server {
         let quota_enabled = settings.syncstorage.enable_quota;
         let actix_keep_alive = settings.actix_keep_alive;
         let tokenserver_state = if settings.tokenserver.enabled {
-            let state = tokenserver::ServerState::from_settings(
+            let mut state = tokenserver::ServerState::from_settings(
                 &settings.tokenserver,
                 syncserver_common::metrics_from_opts(
                     &settings.tokenserver.statsd_label,
@@ -306,6 +307,7 @@ impl Server {
                 )?,
                 blocking_threadpool,
             )?;
+            state.init().await;
 
             Some(state)
         } else {
@@ -373,7 +375,7 @@ impl Server {
                 .unwrap_or(0) as usize;
         let blocking_threadpool = Arc::new(BlockingThreadpool::new(thread_count));
         let worker_thread_count = calculate_worker_max_blocking_threads(thread_count);
-        let tokenserver_state = tokenserver::ServerState::from_settings(
+        let mut tokenserver_state = tokenserver::ServerState::from_settings(
             &settings.tokenserver,
             syncserver_common::metrics_from_opts(
                 &settings.tokenserver.statsd_label,
@@ -382,6 +384,7 @@ impl Server {
             )?,
             blocking_threadpool.clone(),
         )?;
+        tokenserver_state.init().await;
 
         spawn_metric_periodic_reporter(
             Duration::from_secs(10),

@@ -23,12 +23,13 @@ pub async fn db_pool(settings: Option<SyncstorageSettings>) -> Result<DbPoolImpl
     settings.database_use_test_transactions = use_test_transactions;
 
     let metrics = Metrics::noop();
-    let pool = DbPoolImpl::new(&settings, &metrics, Arc::new(BlockingThreadpool::new(512)))?;
+    let mut pool = DbPoolImpl::new(&settings, &metrics, Arc::new(BlockingThreadpool::new(512)))?;
+    pool.init().await?;
     Ok(pool)
 }
 
 pub async fn test_db(pool: DbPoolImpl) -> Result<Box<dyn Db<Error = DbError>>, DbError> {
-    let db = pool.get().await?;
+    let mut db = pool.get().await?;
     // Spanner won't have a timestamp until lock_for_xxx are called: fill one
     // in for it
     db.set_timestamp(SyncTimestamp::default());

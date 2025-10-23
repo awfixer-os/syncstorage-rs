@@ -12,9 +12,11 @@ use syncserver_common::{self, MAX_SPANNER_LOAD_SIZE};
 static KILOBYTE: u32 = 1024;
 static MEGABYTE: u32 = KILOBYTE * KILOBYTE;
 static GIGABYTE: u32 = MEGABYTE * 1_000;
-static DEFAULT_MAX_POST_BYTES: u32 = 2 * MEGABYTE;
+// Current limit of 2.5 MB
+static DEFAULT_MAX_POST_BYTES: u32 = (2.5 * MEGABYTE as f32) as u32;
 static DEFAULT_MAX_POST_RECORDS: u32 = 100;
-static DEFAULT_MAX_RECORD_PAYLOAD_BYTES: u32 = 2 * MEGABYTE;
+// Current limit of 2.5 MB
+static DEFAULT_MAX_RECORD_PAYLOAD_BYTES: u32 = (2.5 * MEGABYTE as f32) as u32;
 static DEFAULT_MAX_REQUEST_BYTES: u32 = DEFAULT_MAX_POST_BYTES + 4 * KILOBYTE;
 static DEFAULT_MAX_TOTAL_BYTES: u32 = 100 * DEFAULT_MAX_POST_BYTES;
 // also used to determine the max number of records to return for MySQL.
@@ -70,8 +72,6 @@ impl From<&Settings> for Deadman {
 pub struct Settings {
     pub database_url: String,
     pub database_pool_max_size: u32,
-    // NOTE: Not supported by deadpool!
-    pub database_pool_min_idle: Option<u32>,
     /// Pool timeout when waiting for a slot to become available, in seconds
     pub database_pool_connection_timeout: Option<u32>,
     /// Max age a given connection should live, in seconds
@@ -114,7 +114,6 @@ impl Default for Settings {
         Settings {
             database_url: "mysql://root@127.0.0.1/syncstorage".to_string(),
             database_pool_max_size: 10,
-            database_pool_min_idle: None,
             database_pool_connection_lifespan: None,
             database_pool_connection_max_idle: None,
             database_pool_sweeper_task_interval: 30,
@@ -175,6 +174,7 @@ pub struct ServerLimits {
     pub max_post_records: u32,
 
     /// Maximum size of an individual BSO payload, in bytes.
+    /// At present is limited to 2.5MB
     pub max_record_payload_bytes: u32,
 
     /// Maximum `Content-Length` for all incoming requests, in bytes.

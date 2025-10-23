@@ -15,7 +15,7 @@ use syncserver_common::{BlockingThreadpool, Metrics};
 use tokenserver_auth::JWTVerifierImpl;
 use tokenserver_auth::{oauth, VerifyToken};
 use tokenserver_common::NodeType;
-use tokenserver_db::{params, DbPool, TokenserverPool};
+use tokenserver_db::{pool_from_settings, DbPool};
 use tokenserver_settings::Settings;
 
 use crate::{error::ApiError, server::user_agent};
@@ -38,7 +38,7 @@ impl ServerState {
     pub fn from_settings(
         settings: &Settings,
         metrics: Arc<StatsdClient>,
-        blocking_threadpool: Arc<BlockingThreadpool>,
+        #[allow(unused_variables)] blocking_threadpool: Arc<BlockingThreadpool>,
     ) -> Result<Self, ApiError> {
         #[cfg(not(feature = "py_verifier"))]
         let oauth_verifier = {
@@ -72,35 +72,26 @@ impl ServerState {
         );
         let use_test_transactions = false;
 
-        let mut db_pool = TokenserverPool::new(
-            settings,
-            &Metrics::from(&metrics),
-            blocking_threadpool,
-            use_test_transactions,
-        )
-        .expect("Failed to create Tokenserver pool");
-        // NOTE: Provided there's a "sync-1.5" service record in the database, it is highly
-        // unlikely for this query to fail outside of network failures or other random errors
-        db_pool.service_id = db_pool
-            .get_sync()
-            .and_then(|db| {
-                db.get_service_id_sync(params::GetServiceId {
-                    service: "sync-1.5".to_owned(),
-                })
-            })
-            .ok()
-            .map(|result| result.id);
-
+        let db_pool = pool_from_settings(settings, &Metrics::from(&metrics), use_test_transactions)
+            .expect("Failed to create Tokenserver pool");
         Ok(ServerState {
             fxa_email_domain: settings.fxa_email_domain.clone(),
             fxa_metrics_hash_secret: settings.fxa_metrics_hash_secret.clone(),
             oauth_verifier,
-            db_pool: Box::new(db_pool),
+            db_pool,
             node_capacity_release_rate: settings.node_capacity_release_rate,
             node_type: settings.node_type,
             metrics,
             token_duration: settings.token_duration,
         })
+    }
+
+    /// Initialize the db_pool: run migrations, etc.
+    pub async fn init(&mut self) {
+        self.db_pool
+            .init()
+            .await
+            .expect("Failed to init Tokenserver pool");
     }
 }
 

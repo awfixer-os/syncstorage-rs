@@ -9,7 +9,7 @@ use syncstorage_settings::{Quota, Settings};
 use tokio::sync::RwLock;
 
 pub(super) use super::manager::Conn;
-use super::{error::DbError, manager::SpannerSessionManager, models::SpannerDb, DbResult};
+use super::{db::SpannerDb, error::DbError, manager::SpannerSessionManager, DbResult};
 
 #[derive(Clone)]
 pub struct SpannerDbPool {
@@ -72,7 +72,7 @@ impl SpannerDbPool {
         })
     }
 
-    pub async fn get_async(&self) -> DbResult<SpannerDb> {
+    pub async fn get_spanner_db(&self) -> DbResult<SpannerDb> {
         let conn = self.pool.get().await.map_err(|e| match e {
             deadpool::managed::PoolError::Backend(dbe) => dbe,
             deadpool::managed::PoolError::Timeout(timeout_type) => {
@@ -121,13 +121,13 @@ impl DbPool for SpannerDbPool {
         let mut metrics = self.metrics.clone();
         metrics.start_timer("storage.spanner.get_pool", None);
 
-        self.get_async()
+        self.get_spanner_db()
             .await
             .map(|db| Box::new(db) as Box<dyn Db<Error = Self::Error>>)
     }
 
     fn validate_batch_id(&self, id: String) -> DbResult<()> {
-        super::batch::validate_batch_id(&id)
+        super::db::validate_batch_id(&id)
     }
 
     fn box_clone(&self) -> Box<dyn DbPool<Error = Self::Error>> {

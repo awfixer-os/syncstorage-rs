@@ -23,6 +23,7 @@ pub type DeleteCollection = SyncTimestamp;
 pub type DeleteBsos = SyncTimestamp;
 pub type DeleteBso = SyncTimestamp;
 pub type PutBso = SyncTimestamp;
+pub type PostBsos = SyncTimestamp;
 
 #[derive(Debug, Default, Clone)]
 pub struct CreateBatch {
@@ -46,21 +47,21 @@ pub struct GetQuotaUsage {
 
 #[derive(Debug, Default, Deserialize, Queryable, QueryableByName, Serialize)]
 pub struct GetBso {
-    #[sql_type = "Text"]
+    #[diesel(sql_type = Text)]
     pub id: String,
-    #[sql_type = "BigInt"]
+    #[diesel(sql_type = BigInt)]
     pub modified: SyncTimestamp,
-    #[sql_type = "Text"]
+    #[diesel(sql_type = Text)]
     pub payload: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[sql_type = "Nullable<Integer>"]
+    #[diesel(sql_type = Nullable<Integer>)]
     pub sortindex: Option<i32>,
     // NOTE: expiry (ttl) is never rendered to clients and only loaded for
     // tests: this and its associated queries/loading could be wrapped in
     // #[cfg(test)]
     #[serde(skip_serializing)]
     #[serde(skip_deserializing)]
-    #[sql_type = "BigInt"]
+    #[diesel(sql_type = BigInt)]
     pub expiry: i64,
 }
 
@@ -75,13 +76,6 @@ where
 
 pub type GetBsos = Paginated<GetBso>;
 pub type GetBsoIds = Paginated<String>;
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-pub struct PostBsos {
-    pub modified: SyncTimestamp,
-    pub success: Vec<String>,
-    pub failed: HashMap<String, String>,
-}
 
 #[derive(Debug, Default)]
 pub struct ConnectionInfo {

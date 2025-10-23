@@ -18,13 +18,13 @@ use http::StatusCode;
 use lazy_static::lazy_static;
 use rand::{thread_rng, Rng};
 use serde::de::DeserializeOwned;
-use serde_json::json;
+use serde_json::{json, Value};
 use sha2::Sha256;
 use syncserver_common::{self, X_LAST_MODIFIED};
 use syncserver_settings::{Secrets, Settings};
 use syncstorage_db::{
     params,
-    results::{DeleteBso, GetBso, PostBsos, PutBso},
+    results::{DeleteBso, GetBso, PutBso},
     DbPoolImpl, SyncTimestamp,
 };
 use syncstorage_settings::ServerLimits;
@@ -93,15 +93,21 @@ async fn get_test_state(settings: &Settings) -> ServerState {
         app_channel: settings.environment.clone(),
     });
 
+    let mut db_pool = Box::new(
+        DbPoolImpl::new(
+            &settings.syncstorage,
+            &Metrics::from(&metrics),
+            blocking_threadpool,
+        )
+        .expect("Could not get db_pool in get_test_state"),
+    );
+    db_pool
+        .init()
+        .await
+        .expect("Could not init db_pool in get_test_state");
+
     ServerState {
-        db_pool: Box::new(
-            DbPoolImpl::new(
-                &settings.syncstorage,
-                &Metrics::from(&metrics),
-                blocking_threadpool,
-            )
-            .expect("Could not get db_pool in get_test_state"),
-        ),
+        db_pool,
         limits: Arc::clone(&SERVER_LIMITS),
         limits_json: serde_json::to_string(&**SERVER_LIMITS).unwrap(),
         metrics,
@@ -447,11 +453,13 @@ async fn post_collection() {
     }]);
     let bytes =
         test_endpoint_with_body(http::Method::POST, "/1.5/42/storage/bookmarks", res_body).await;
-    let result: PostBsos =
+    let result: Value =
         serde_json::from_slice(&bytes).expect("Could not get result in post_collection");
-    assert!(result.modified >= start);
-    assert_eq!(result.success.len(), 1);
-    assert_eq!(result.failed.len(), 0);
+    let modified: SyncTimestamp =
+        serde_json::from_value(result["modified"].clone()).expect("modified as SyncTimestamp");
+    assert!(modified >= start);
+    assert_eq!(result["success"].as_array().unwrap().len(), 1);
+    assert_eq!(result["failed"].as_object().unwrap().len(), 0);
 }
 
 #[actix_rt::test]
@@ -499,10 +507,10 @@ async fn bsos_can_have_a_collection_field() {
          {"id": "2", "collection": "foo", "payload": "SomePayload"},
     ]);
     let bytes = test_endpoint_with_body(http::Method::POST, "/1.5/42/storage/meta", bsos).await;
-    let result: PostBsos = serde_json::from_slice(&bytes)
+    let result: Value = serde_json::from_slice(&bytes)
         .expect("Could not get result in bsos_can_have_a_collection_field");
-    assert_eq!(result.success.len(), 2);
-    assert_eq!(result.failed.len(), 0);
+    assert_eq!(result["success"].as_array().unwrap().len(), 2);
+    assert_eq!(result["failed"].as_object().unwrap().len(), 0);
 
     let bytes =
         test_endpoint_with_body(http::Method::PUT, "/1.5/42/storage/meta/global", bso1).await;

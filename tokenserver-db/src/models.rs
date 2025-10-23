@@ -1,58 +1,25 @@
+use std::time::Duration;
+#[cfg(debug_assertions)]
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
 use diesel::{
-    mysql::MysqlConnection,
-    r2d2::{ConnectionManager, PooledConnection},
     sql_types::{Bigint, Float, Integer, Nullable, Text},
-    OptionalExtension, RunQueryDsl,
+    OptionalExtension,
 };
-#[cfg(test)]
-use diesel_logger::LoggingConnection;
+use diesel_async::RunQueryDsl;
 use http::StatusCode;
-use syncserver_common::{BlockingThreadpool, Metrics};
-use syncserver_db_common::{sync_db_method, DbFuture};
+use syncserver_common::Metrics;
+use tokenserver_db_common::{params, results, Db, DbError, DbResult};
 
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use super::pool::Conn;
 
-use super::{
-    error::{DbError, DbResult},
-    params, results,
-};
-
-/// The maximum possible generation number. Used as a tombstone to mark users that have been
-/// "retired" from the db.
-const MAX_GENERATION: i64 = i64::MAX;
-
-type Conn = PooledConnection<ConnectionManager<MysqlConnection>>;
-
-#[derive(Clone)]
 pub struct TokenserverDb {
-    /// Synchronous Diesel calls are executed on a blocking threadpool to satisfy
-    /// the Db trait's asynchronous interface.
-    ///
-    /// Arc<MysqlDbInner> provides a Clone impl utilized for safely moving to
-    /// the thread pool but does not provide Send as the underlying db
-    /// conn. structs are !Sync (Arc requires both for Send). See the Send impl
-    /// below.
-    inner: Arc<DbInner>,
+    conn: Conn,
     metrics: Metrics,
     service_id: Option<i32>,
     spanner_node_id: Option<i32>,
-    blocking_threadpool: Arc<BlockingThreadpool>,
     pub timeout: Option<Duration>,
-}
-
-/// Despite the db conn structs being !Sync (see Arc<MysqlDbInner> above) we
-/// don't spawn multiple MysqlDb calls at a time in the thread pool. Calls are
-/// queued to the thread pool via Futures, naturally serialized.
-unsafe impl Send for TokenserverDb {}
-
-struct DbInner {
-    #[cfg(not(test))]
-    pub(super) conn: Conn,
-    #[cfg(test)]
-    pub(super) conn: LoggingConnection<Conn>, // display SQL when RUST_LOG="diesel_logger=trace"
 }
 
 impl TokenserverDb {
@@ -62,35 +29,25 @@ impl TokenserverDb {
     // requests, using this function would introduce a race condition, as we could potentially
     // get IDs from records created during other requests.
     const LAST_INSERT_ID_QUERY: &'static str = "SELECT LAST_INSERT_ID() AS id";
+    const LAST_INSERT_UID_QUERY: &'static str = "SELECT LAST_INSERT_ID() AS uid";
 
     pub fn new(
         conn: Conn,
         metrics: &Metrics,
         service_id: Option<i32>,
         spanner_node_id: Option<i32>,
-        blocking_threadpool: Arc<BlockingThreadpool>,
         timeout: Option<Duration>,
     ) -> Self {
-        let inner = DbInner {
-            #[cfg(not(test))]
-            conn,
-            #[cfg(test)]
-            conn: LoggingConnection::new(conn),
-        };
-
-        // https://github.com/mozilla-services/syncstorage-rs/issues/1480
-        #[allow(clippy::arc_with_non_send_sync)]
         Self {
-            inner: Arc::new(inner),
+            conn,
             metrics: metrics.clone(),
             service_id,
             spanner_node_id,
-            blocking_threadpool,
             timeout,
         }
     }
 
-    fn get_node_id_sync(&self, params: params::GetNodeId) -> DbResult<results::GetNodeId> {
+    async fn get_node_id(&mut self, params: params::GetNodeId) -> DbResult<results::GetNodeId> {
         const QUERY: &str = r#"
             SELECT id
               FROM nodes
@@ -104,16 +61,20 @@ impl TokenserverDb {
             let mut metrics = self.metrics.clone();
             metrics.start_timer("storage.get_node_id", None);
 
-            diesel::sql_query(QUERY)
+            let result = diesel::sql_query(QUERY)
                 .bind::<Integer, _>(params.service_id)
                 .bind::<Text, _>(&params.node)
-                .get_result(&self.inner.conn)
-                .map_err(Into::into)
+                .get_result(&mut self.conn)
+                .await?;
+            Ok(result)
         }
     }
 
     /// Mark users matching the given email and service ID as replaced.
-    fn replace_users_sync(&self, params: params::ReplaceUsers) -> DbResult<results::ReplaceUsers> {
+    async fn replace_users(
+        &mut self,
+        params: params::ReplaceUsers,
+    ) -> DbResult<results::ReplaceUsers> {
         const QUERY: &str = r#"
             UPDATE users
                SET replaced_at = ?
@@ -131,13 +92,16 @@ impl TokenserverDb {
             .bind::<Integer, _>(&params.service_id)
             .bind::<Text, _>(&params.email)
             .bind::<Bigint, _>(params.replaced_at)
-            .execute(&self.inner.conn)
-            .map(|_| ())
-            .map_err(Into::into)
+            .execute(&mut self.conn)
+            .await?;
+        Ok(())
     }
 
     /// Mark the user with the given uid and service ID as being replaced.
-    fn replace_user_sync(&self, params: params::ReplaceUser) -> DbResult<results::ReplaceUser> {
+    async fn replace_user(
+        &mut self,
+        params: params::ReplaceUser,
+    ) -> DbResult<results::ReplaceUser> {
         const QUERY: &str = r#"
             UPDATE users
                SET replaced_at = ?
@@ -149,14 +113,14 @@ impl TokenserverDb {
             .bind::<Bigint, _>(params.replaced_at)
             .bind::<Integer, _>(params.service_id)
             .bind::<Bigint, _>(params.uid)
-            .execute(&self.inner.conn)
-            .map(|_| ())
-            .map_err(Into::into)
+            .execute(&mut self.conn)
+            .await?;
+        Ok(())
     }
 
     /// Update the user with the given email and service ID with the given `generation` and
     /// `keys_changed_at`.
-    fn put_user_sync(&self, params: params::PutUser) -> DbResult<results::PutUser> {
+    async fn put_user(&mut self, params: params::PutUser) -> DbResult<results::PutUser> {
         // The `where` clause on this statement is designed as an extra layer of
         // protection, to ensure that concurrent updates don't accidentally move
         // timestamp fields backwards in time. The handling of `keys_changed_at`
@@ -183,13 +147,13 @@ impl TokenserverDb {
             .bind::<Text, _>(&params.email)
             .bind::<Bigint, _>(params.generation)
             .bind::<Nullable<Bigint>, _>(params.keys_changed_at)
-            .execute(&self.inner.conn)
-            .map(|_| ())
-            .map_err(Into::into)
+            .execute(&mut self.conn)
+            .await?;
+        Ok(())
     }
 
     /// Create a new user.
-    fn post_user_sync(&self, user: params::PostUser) -> DbResult<results::PostUser> {
+    async fn post_user(&mut self, user: params::PostUser) -> DbResult<results::PostUser> {
         const QUERY: &str = r#"
             INSERT INTO users (service, email, generation, client_state, created_at, nodeid, keys_changed_at, replaced_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, NULL);
@@ -206,22 +170,27 @@ impl TokenserverDb {
             .bind::<Bigint, _>(user.created_at)
             .bind::<Bigint, _>(user.node_id)
             .bind::<Nullable<Bigint>, _>(user.keys_changed_at)
-            .execute(&self.inner.conn)?;
+            .execute(&mut self.conn)
+            .await?;
 
-        diesel::sql_query(Self::LAST_INSERT_ID_QUERY)
-            .bind::<Text, _>(&user.email)
-            .get_result::<results::PostUser>(&self.inner.conn)
-            .map_err(Into::into)
+        let result = diesel::sql_query(Self::LAST_INSERT_UID_QUERY)
+            .get_result::<results::PostUser>(&mut self.conn)
+            .await?;
+        Ok(result)
     }
 
-    fn check_sync(&self) -> DbResult<results::Check> {
-        // has the database been up for more than 0 seconds?
-        let result = diesel::sql_query("SHOW STATUS LIKE \"Uptime\"").execute(&self.inner.conn)?;
-        Ok(result as u64 > 0)
+    async fn check(&mut self) -> DbResult<results::Check> {
+        diesel::sql_query("SELECT 1")
+            .execute(&mut self.conn)
+            .await?;
+        Ok(true)
     }
 
     /// Gets the least-loaded node that has available slots.
-    fn get_best_node_sync(&self, params: params::GetBestNode) -> DbResult<results::GetBestNode> {
+    async fn get_best_node(
+        &mut self,
+        params: params::GetBestNode,
+    ) -> DbResult<results::GetBestNode> {
         const DEFAULT_CAPACITY_RELEASE_RATE: f32 = 0.1;
         const GET_BEST_NODE_QUERY: &str = r#"
               SELECT id, node
@@ -255,7 +224,8 @@ impl TokenserverDb {
         if let Some(spanner_node_id) = self.spanner_node_id {
             diesel::sql_query(SPANNER_QUERY)
                 .bind::<Integer, _>(spanner_node_id)
-                .get_result::<results::GetBestNode>(&self.inner.conn)
+                .get_result::<results::GetBestNode>(&mut self.conn)
+                .await
                 .map_err(|e| {
                     let mut db_error =
                         DbError::internal(format!("unable to get Spanner node: {}", e));
@@ -268,7 +238,8 @@ impl TokenserverDb {
             for _ in 0..5 {
                 let maybe_result = diesel::sql_query(GET_BEST_NODE_QUERY)
                     .bind::<Integer, _>(params.service_id)
-                    .get_result::<results::GetBestNode>(&self.inner.conn)
+                    .get_result::<results::GetBestNode>(&mut self.conn)
+                    .await
                     .optional()?;
 
                 if let Some(result) = maybe_result {
@@ -284,7 +255,8 @@ impl TokenserverDb {
                             .unwrap_or(DEFAULT_CAPACITY_RELEASE_RATE),
                     )
                     .bind::<Integer, _>(params.service_id)
-                    .execute(&self.inner.conn)?;
+                    .execute(&mut self.conn)
+                    .await?;
 
                 // If no nodes were affected by the last query, give up.
                 if affected_rows == 0 {
@@ -298,8 +270,8 @@ impl TokenserverDb {
         }
     }
 
-    fn add_user_to_node_sync(
-        &self,
+    async fn add_user_to_node(
+        &mut self,
         params: params::AddUserToNode,
     ) -> DbResult<results::AddUserToNode> {
         let mut metrics = self.metrics.clone();
@@ -328,12 +300,12 @@ impl TokenserverDb {
         diesel::sql_query(query)
             .bind::<Integer, _>(params.service_id)
             .bind::<Text, _>(&params.node)
-            .execute(&self.inner.conn)
-            .map(|_| ())
-            .map_err(Into::into)
+            .execute(&mut self.conn)
+            .await?;
+        Ok(())
     }
 
-    fn get_users_sync(&self, params: params::GetUsers) -> DbResult<results::GetUsers> {
+    async fn get_users(&mut self, params: params::GetUsers) -> DbResult<results::GetUsers> {
         let mut metrics = self.metrics.clone();
         metrics.start_timer("storage.get_users", None);
 
@@ -348,175 +320,16 @@ impl TokenserverDb {
                       LIMIT 20
         "#;
 
-        diesel::sql_query(QUERY)
+        let result = diesel::sql_query(QUERY)
             .bind::<Text, _>(&params.email)
             .bind::<Integer, _>(params.service_id)
-            .load::<results::GetRawUser>(&self.inner.conn)
-            .map_err(Into::into)
+            .load::<results::GetRawUser>(&mut self.conn)
+            .await?;
+        Ok(result)
     }
 
-    /// Gets the user with the given email and service ID, or if one doesn't exist, allocates a new
-    /// user.
-    fn get_or_create_user_sync(
-        &self,
-        params: params::GetOrCreateUser,
-    ) -> DbResult<results::GetOrCreateUser> {
-        let mut raw_users = self.get_users_sync(params::GetUsers {
-            service_id: params.service_id,
-            email: params.email.clone(),
-        })?;
-
-        if raw_users.is_empty() {
-            // There are no users in the database with the given email and service ID, so
-            // allocate a new one.
-            let allocate_user_result =
-                self.allocate_user_sync(params.clone() as params::AllocateUser)?;
-
-            Ok(results::GetOrCreateUser {
-                uid: allocate_user_result.uid,
-                email: params.email,
-                client_state: params.client_state,
-                generation: params.generation,
-                node: allocate_user_result.node,
-                keys_changed_at: params.keys_changed_at,
-                created_at: allocate_user_result.created_at,
-                replaced_at: None,
-                first_seen_at: allocate_user_result.created_at,
-                old_client_states: vec![],
-            })
-        } else {
-            raw_users.sort_by_key(|raw_user| (raw_user.generation, raw_user.created_at));
-            raw_users.reverse();
-
-            // The user with the greatest `generation` and `created_at` is the current user
-            let raw_user = raw_users[0].clone();
-
-            // Collect any old client states that differ from the current client state
-            let old_client_states: Vec<String> = {
-                raw_users[1..]
-                    .iter()
-                    .map(|user| user.client_state.clone())
-                    .filter(|client_state| client_state != &raw_user.client_state)
-                    .collect()
-            };
-
-            // Make sure every old row is marked as replaced. They might not be, due to races in row
-            // creation.
-            for old_user in &raw_users[1..] {
-                if old_user.replaced_at.is_none() {
-                    let params = params::ReplaceUser {
-                        uid: old_user.uid,
-                        service_id: params.service_id,
-                        replaced_at: raw_user.created_at,
-                    };
-
-                    self.replace_user_sync(params)?;
-                }
-            }
-
-            let first_seen_at = raw_users[raw_users.len() - 1].created_at;
-
-            match (raw_user.replaced_at, raw_user.node) {
-                // If the most up-to-date user is marked as replaced or does not have a node
-                // assignment, allocate a new user. Note that, if the current user is marked
-                // as replaced, we do not want to create a new user with the account metadata
-                // in the parameters to this method. Rather, we want to create a duplicate of
-                // the replaced user assigned to a new node. This distinction is important
-                // because the account metadata in the parameters to this method may not match
-                // that currently stored on the most up-to-date user and may be invalid.
-                (Some(_), _) | (_, None) if raw_user.generation < MAX_GENERATION => {
-                    let allocate_user_result = {
-                        self.allocate_user_sync(params::AllocateUser {
-                            service_id: params.service_id,
-                            email: params.email.clone(),
-                            generation: raw_user.generation,
-                            client_state: raw_user.client_state.clone(),
-                            keys_changed_at: raw_user.keys_changed_at,
-                            capacity_release_rate: params.capacity_release_rate,
-                        })?
-                    };
-
-                    Ok(results::GetOrCreateUser {
-                        uid: allocate_user_result.uid,
-                        email: params.email,
-                        client_state: raw_user.client_state,
-                        generation: raw_user.generation,
-                        node: allocate_user_result.node,
-                        keys_changed_at: raw_user.keys_changed_at,
-                        created_at: allocate_user_result.created_at,
-                        replaced_at: None,
-                        first_seen_at,
-                        old_client_states,
-                    })
-                }
-                // The most up-to-date user has a node. Note that this user may be retired or
-                // replaced.
-                (_, Some(node)) => Ok(results::GetOrCreateUser {
-                    uid: raw_user.uid,
-                    email: params.email,
-                    client_state: raw_user.client_state,
-                    generation: raw_user.generation,
-                    node,
-                    keys_changed_at: raw_user.keys_changed_at,
-                    created_at: raw_user.created_at,
-                    replaced_at: None,
-                    first_seen_at,
-                    old_client_states,
-                }),
-                // The most up-to-date user doesn't have a node and is retired. This is an internal
-                // service error for compatibility reasons (the legacy Tokenserver returned an
-                // internal service error in this situation).
-                (_, None) => {
-                    let uid = raw_user.uid;
-                    warn!("Tokenserver user retired"; "uid" => &uid);
-                    Err(DbError::internal("Tokenserver user retired".to_owned()))
-                }
-            }
-        }
-    }
-
-    /// Creates a new user and assigns them to a node.
-    fn allocate_user_sync(&self, params: params::AllocateUser) -> DbResult<results::AllocateUser> {
-        let mut metrics = self.metrics.clone();
-        metrics.start_timer("storage.allocate_user", None);
-
-        // Get the least-loaded node
-        let node = self.get_best_node_sync(params::GetBestNode {
-            service_id: params.service_id,
-            capacity_release_rate: params.capacity_release_rate,
-        })?;
-
-        // Decrement `available` and increment `current_load` on the node assigned to the user.
-        self.add_user_to_node_sync(params::AddUserToNode {
-            service_id: params.service_id,
-            node: node.node.clone(),
-        })?;
-
-        let created_at = {
-            let start = SystemTime::now();
-            start.duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
-        };
-        let uid = self
-            .post_user_sync(params::PostUser {
-                service_id: params.service_id,
-                email: params.email.clone(),
-                generation: params.generation,
-                client_state: params.client_state.clone(),
-                created_at,
-                node_id: node.id,
-                keys_changed_at: params.keys_changed_at,
-            })?
-            .id;
-
-        Ok(results::AllocateUser {
-            uid,
-            node: node.node,
-            created_at,
-        })
-    }
-
-    pub fn get_service_id_sync(
-        &self,
+    pub async fn get_service_id(
+        &mut self,
         params: params::GetServiceId,
     ) -> DbResult<results::GetServiceId> {
         const QUERY: &str = r#"
@@ -528,16 +341,17 @@ impl TokenserverDb {
         if let Some(id) = self.service_id {
             Ok(results::GetServiceId { id })
         } else {
-            diesel::sql_query(QUERY)
+            let result = diesel::sql_query(QUERY)
                 .bind::<Text, _>(params.service)
-                .get_result::<results::GetServiceId>(&self.inner.conn)
-                .map_err(Into::into)
+                .get_result::<results::GetServiceId>(&mut self.conn)
+                .await?;
+            Ok(result)
         }
     }
 
-    #[cfg(test)]
-    fn set_user_created_at_sync(
-        &self,
+    #[cfg(debug_assertions)]
+    async fn set_user_created_at(
+        &mut self,
         params: params::SetUserCreatedAt,
     ) -> DbResult<results::SetUserCreatedAt> {
         const QUERY: &str = r#"
@@ -548,14 +362,14 @@ impl TokenserverDb {
         diesel::sql_query(QUERY)
             .bind::<Bigint, _>(params.created_at)
             .bind::<Bigint, _>(&params.uid)
-            .execute(&self.inner.conn)
-            .map(|_| ())
-            .map_err(Into::into)
+            .execute(&mut self.conn)
+            .await?;
+        Ok(())
     }
 
-    #[cfg(test)]
-    fn set_user_replaced_at_sync(
-        &self,
+    #[cfg(debug_assertions)]
+    async fn set_user_replaced_at(
+        &mut self,
         params: params::SetUserReplacedAt,
     ) -> DbResult<results::SetUserReplacedAt> {
         const QUERY: &str = r#"
@@ -566,27 +380,28 @@ impl TokenserverDb {
         diesel::sql_query(QUERY)
             .bind::<Bigint, _>(params.replaced_at)
             .bind::<Bigint, _>(&params.uid)
-            .execute(&self.inner.conn)
-            .map(|_| ())
-            .map_err(Into::into)
+            .execute(&mut self.conn)
+            .await?;
+        Ok(())
     }
 
-    #[cfg(test)]
-    fn get_user_sync(&self, params: params::GetUser) -> DbResult<results::GetUser> {
+    #[cfg(debug_assertions)]
+    async fn get_user(&mut self, params: params::GetUser) -> DbResult<results::GetUser> {
         const QUERY: &str = r#"
             SELECT service, email, generation, client_state, replaced_at, nodeid, keys_changed_at
               FROM users
              WHERE uid = ?
         "#;
 
-        diesel::sql_query(QUERY)
+        let result = diesel::sql_query(QUERY)
             .bind::<Bigint, _>(params.id)
-            .get_result::<results::GetUser>(&self.inner.conn)
-            .map_err(Into::into)
+            .get_result::<results::GetUser>(&mut self.conn)
+            .await?;
+        Ok(result)
     }
 
-    #[cfg(test)]
-    fn post_node_sync(&self, params: params::PostNode) -> DbResult<results::PostNode> {
+    #[cfg(debug_assertions)]
+    async fn post_node(&mut self, params: params::PostNode) -> DbResult<results::PostNode> {
         const QUERY: &str = r#"
             INSERT INTO nodes (service, node, available, current_load, capacity, downed, backoff)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -599,29 +414,35 @@ impl TokenserverDb {
             .bind::<Integer, _>(params.capacity)
             .bind::<Integer, _>(params.downed)
             .bind::<Integer, _>(params.backoff)
-            .execute(&self.inner.conn)?;
+            .execute(&mut self.conn)
+            .await?;
 
-        diesel::sql_query(Self::LAST_INSERT_ID_QUERY)
-            .get_result::<results::PostNode>(&self.inner.conn)
-            .map_err(Into::into)
+        let result = diesel::sql_query(Self::LAST_INSERT_ID_QUERY)
+            .get_result::<results::PostNode>(&mut self.conn)
+            .await?;
+        Ok(result)
     }
 
-    #[cfg(test)]
-    fn get_node_sync(&self, params: params::GetNode) -> DbResult<results::GetNode> {
+    #[cfg(debug_assertions)]
+    async fn get_node(&mut self, params: params::GetNode) -> DbResult<results::GetNode> {
         const QUERY: &str = r#"
             SELECT *
               FROM nodes
              WHERE id = ?
         "#;
 
-        diesel::sql_query(QUERY)
+        let result = diesel::sql_query(QUERY)
             .bind::<Bigint, _>(params.id)
-            .get_result::<results::GetNode>(&self.inner.conn)
-            .map_err(Into::into)
+            .get_result::<results::GetNode>(&mut self.conn)
+            .await?;
+        Ok(result)
     }
 
-    #[cfg(test)]
-    fn unassign_node_sync(&self, params: params::UnassignNode) -> DbResult<results::UnassignNode> {
+    #[cfg(debug_assertions)]
+    async fn unassign_node(
+        &mut self,
+        params: params::UnassignNode,
+    ) -> DbResult<results::UnassignNode> {
         const QUERY: &str = r#"
             UPDATE users
                SET replaced_at = ?
@@ -636,24 +457,27 @@ impl TokenserverDb {
         diesel::sql_query(QUERY)
             .bind::<Bigint, _>(current_time)
             .bind::<Bigint, _>(params.node_id)
-            .execute(&self.inner.conn)
-            .map(|_| ())
-            .map_err(Into::into)
+            .execute(&mut self.conn)
+            .await?;
+        Ok(())
     }
 
-    #[cfg(test)]
-    fn remove_node_sync(&self, params: params::RemoveNode) -> DbResult<results::RemoveNode> {
+    #[cfg(debug_assertions)]
+    async fn remove_node(&mut self, params: params::RemoveNode) -> DbResult<results::RemoveNode> {
         const QUERY: &str = "DELETE FROM nodes WHERE id = ?";
 
         diesel::sql_query(QUERY)
             .bind::<Bigint, _>(params.node_id)
-            .execute(&self.inner.conn)
-            .map(|_| ())
-            .map_err(Into::into)
+            .execute(&mut self.conn)
+            .await?;
+        Ok(())
     }
 
-    #[cfg(test)]
-    fn post_service_sync(&self, params: params::PostService) -> DbResult<results::PostService> {
+    #[cfg(debug_assertions)]
+    async fn post_service(
+        &mut self,
+        params: params::PostService,
+    ) -> DbResult<results::PostService> {
         const INSERT_SERVICE_QUERY: &str = r#"
             INSERT INTO services (service, pattern)
             VALUES (?, ?)
@@ -662,153 +486,148 @@ impl TokenserverDb {
         diesel::sql_query(INSERT_SERVICE_QUERY)
             .bind::<Text, _>(&params.service)
             .bind::<Text, _>(&params.pattern)
-            .execute(&self.inner.conn)?;
+            .execute(&mut self.conn)
+            .await?;
 
-        diesel::sql_query(Self::LAST_INSERT_ID_QUERY)
-            .get_result::<results::LastInsertId>(&self.inner.conn)
-            .map(|result| results::PostService {
-                id: result.id as i32,
-            })
-            .map_err(Into::into)
+        let result = diesel::sql_query(Self::LAST_INSERT_ID_QUERY)
+            .get_result::<results::PostService>(&mut self.conn)
+            .await?;
+        Ok(result)
+    }
+
+    #[cfg(debug_assertions)]
+    fn set_spanner_node_id(&mut self, params: params::SpannerNodeId) {
+        self.spanner_node_id = params;
     }
 }
 
+#[async_trait(?Send)]
 impl Db for TokenserverDb {
-    sync_db_method!(replace_user, replace_user_sync, ReplaceUser);
-    sync_db_method!(replace_users, replace_users_sync, ReplaceUsers);
-    sync_db_method!(post_user, post_user_sync, PostUser);
+    async fn replace_user(
+        &mut self,
+        params: params::ReplaceUser,
+    ) -> Result<results::ReplaceUser, DbError> {
+        TokenserverDb::replace_user(self, params).await
+    }
 
-    sync_db_method!(put_user, put_user_sync, PutUser);
-    sync_db_method!(get_node_id, get_node_id_sync, GetNodeId);
-    sync_db_method!(get_best_node, get_best_node_sync, GetBestNode);
-    sync_db_method!(add_user_to_node, add_user_to_node_sync, AddUserToNode);
-    sync_db_method!(get_users, get_users_sync, GetUsers);
-    sync_db_method!(get_or_create_user, get_or_create_user_sync, GetOrCreateUser);
-    sync_db_method!(get_service_id, get_service_id_sync, GetServiceId);
+    async fn replace_users(
+        &mut self,
+        params: params::ReplaceUsers,
+    ) -> Result<results::ReplaceUsers, DbError> {
+        TokenserverDb::replace_users(self, params).await
+    }
+
+    async fn post_user(&mut self, params: params::PostUser) -> Result<results::PostUser, DbError> {
+        TokenserverDb::post_user(self, params).await
+    }
+
+    async fn put_user(&mut self, params: params::PutUser) -> Result<results::PutUser, DbError> {
+        TokenserverDb::put_user(self, params).await
+    }
+
+    async fn get_node_id(
+        &mut self,
+        params: params::GetNodeId,
+    ) -> Result<results::GetNodeId, DbError> {
+        TokenserverDb::get_node_id(self, params).await
+    }
+
+    async fn get_best_node(
+        &mut self,
+        params: params::GetBestNode,
+    ) -> Result<results::GetBestNode, DbError> {
+        TokenserverDb::get_best_node(self, params).await
+    }
+
+    async fn add_user_to_node(
+        &mut self,
+        params: params::AddUserToNode,
+    ) -> Result<results::AddUserToNode, DbError> {
+        TokenserverDb::add_user_to_node(self, params).await
+    }
+
+    async fn get_users(&mut self, params: params::GetUsers) -> Result<results::GetUsers, DbError> {
+        TokenserverDb::get_users(self, params).await
+    }
+
+    async fn get_service_id(
+        &mut self,
+        params: params::GetServiceId,
+    ) -> Result<results::GetServiceId, DbError> {
+        TokenserverDb::get_service_id(self, params).await
+    }
+
+    fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
 
     fn timeout(&self) -> Option<Duration> {
         self.timeout
     }
 
-    #[cfg(test)]
-    sync_db_method!(get_user, get_user_sync, GetUser);
-
-    fn check(&self) -> DbFuture<'_, results::Check, DbError> {
-        let db = self.clone();
-        Box::pin(self.blocking_threadpool.spawn(move || db.check_sync()))
+    #[cfg(debug_assertions)]
+    async fn get_user(&mut self, params: params::GetUser) -> Result<results::GetUser, DbError> {
+        TokenserverDb::get_user(self, params).await
     }
 
-    #[cfg(test)]
-    sync_db_method!(
-        set_user_created_at,
-        set_user_created_at_sync,
-        SetUserCreatedAt
-    );
-
-    #[cfg(test)]
-    sync_db_method!(
-        set_user_replaced_at,
-        set_user_replaced_at_sync,
-        SetUserReplacedAt
-    );
-
-    #[cfg(test)]
-    sync_db_method!(post_node, post_node_sync, PostNode);
-
-    #[cfg(test)]
-    sync_db_method!(get_node, get_node_sync, GetNode);
-
-    #[cfg(test)]
-    sync_db_method!(unassign_node, unassign_node_sync, UnassignNode);
-
-    #[cfg(test)]
-    sync_db_method!(remove_node, remove_node_sync, RemoveNode);
-
-    #[cfg(test)]
-    sync_db_method!(post_service, post_service_sync, PostService);
-}
-
-pub trait Db {
-    fn timeout(&self) -> Option<Duration> {
-        None
+    async fn check(&mut self) -> Result<results::Check, DbError> {
+        TokenserverDb::check(self).await
     }
 
-    fn replace_user(
-        &self,
-        params: params::ReplaceUser,
-    ) -> DbFuture<'_, results::ReplaceUser, DbError>;
-
-    fn replace_users(
-        &self,
-        params: params::ReplaceUsers,
-    ) -> DbFuture<'_, results::ReplaceUsers, DbError>;
-
-    fn post_user(&self, params: params::PostUser) -> DbFuture<'_, results::PostUser, DbError>;
-
-    fn put_user(&self, params: params::PutUser) -> DbFuture<'_, results::PutUser, DbError>;
-
-    fn check(&self) -> DbFuture<'_, results::Check, DbError>;
-
-    fn get_node_id(&self, params: params::GetNodeId) -> DbFuture<'_, results::GetNodeId, DbError>;
-
-    fn get_best_node(
-        &self,
-        params: params::GetBestNode,
-    ) -> DbFuture<'_, results::GetBestNode, DbError>;
-
-    fn add_user_to_node(
-        &self,
-        params: params::AddUserToNode,
-    ) -> DbFuture<'_, results::AddUserToNode, DbError>;
-
-    fn get_users(&self, params: params::GetUsers) -> DbFuture<'_, results::GetUsers, DbError>;
-
-    fn get_or_create_user(
-        &self,
-        params: params::GetOrCreateUser,
-    ) -> DbFuture<'_, results::GetOrCreateUser, DbError>;
-
-    fn get_service_id(
-        &self,
-        params: params::GetServiceId,
-    ) -> DbFuture<'_, results::GetServiceId, DbError>;
-
-    #[cfg(test)]
-    fn set_user_created_at(
-        &self,
+    #[cfg(debug_assertions)]
+    async fn set_user_created_at(
+        &mut self,
         params: params::SetUserCreatedAt,
-    ) -> DbFuture<'_, results::SetUserCreatedAt, DbError>;
+    ) -> Result<results::SetUserCreatedAt, DbError> {
+        TokenserverDb::set_user_created_at(self, params).await
+    }
 
-    #[cfg(test)]
-    fn set_user_replaced_at(
-        &self,
+    #[cfg(debug_assertions)]
+    async fn set_user_replaced_at(
+        &mut self,
         params: params::SetUserReplacedAt,
-    ) -> DbFuture<'_, results::SetUserReplacedAt, DbError>;
+    ) -> Result<results::SetUserReplacedAt, DbError> {
+        TokenserverDb::set_user_replaced_at(self, params).await
+    }
 
-    #[cfg(test)]
-    fn get_user(&self, params: params::GetUser) -> DbFuture<'_, results::GetUser, DbError>;
+    #[cfg(debug_assertions)]
+    async fn post_node(&mut self, params: params::PostNode) -> Result<results::PostNode, DbError> {
+        TokenserverDb::post_node(self, params).await
+    }
 
-    #[cfg(test)]
-    fn post_node(&self, params: params::PostNode) -> DbFuture<'_, results::PostNode, DbError>;
+    #[cfg(debug_assertions)]
+    async fn get_node(&mut self, params: params::GetNode) -> Result<results::GetNode, DbError> {
+        TokenserverDb::get_node(self, params).await
+    }
 
-    #[cfg(test)]
-    fn get_node(&self, params: params::GetNode) -> DbFuture<'_, results::GetNode, DbError>;
-
-    #[cfg(test)]
-    fn unassign_node(
-        &self,
+    #[cfg(debug_assertions)]
+    async fn unassign_node(
+        &mut self,
         params: params::UnassignNode,
-    ) -> DbFuture<'_, results::UnassignNode, DbError>;
+    ) -> Result<results::UnassignNode, DbError> {
+        TokenserverDb::unassign_node(self, params).await
+    }
 
-    #[cfg(test)]
-    fn remove_node(&self, params: params::RemoveNode)
-        -> DbFuture<'_, results::RemoveNode, DbError>;
+    #[cfg(debug_assertions)]
+    async fn remove_node(
+        &mut self,
+        params: params::RemoveNode,
+    ) -> Result<results::RemoveNode, DbError> {
+        TokenserverDb::remove_node(self, params).await
+    }
 
-    #[cfg(test)]
-    fn post_service(
-        &self,
+    #[cfg(debug_assertions)]
+    async fn post_service(
+        &mut self,
         params: params::PostService,
-    ) -> DbFuture<'_, results::PostService, DbError>;
+    ) -> Result<results::PostService, DbError> {
+        TokenserverDb::post_service(self, params).await
+    }
+
+    #[cfg(debug_assertions)]
+    fn set_spanner_node_id(&mut self, params: params::SpannerNodeId) {
+        TokenserverDb::set_spanner_node_id(self, params)
+    }
 }
 
 #[cfg(test)]
@@ -819,13 +638,14 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use syncserver_settings::Settings;
+    use tokenserver_db_common::{DbPool, MAX_GENERATION};
 
-    use crate::pool::{DbPool, TokenserverPool};
+    use crate::pool_from_settings;
 
     #[tokio::test]
     async fn test_update_generation() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -856,7 +676,7 @@ mod tests {
                 ..Default::default()
             })
             .await?
-            .id;
+            .uid;
 
         let user = db.get_user(params::GetUser { id: uid }).await?;
 
@@ -899,7 +719,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_keys_changed_at() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -930,7 +750,7 @@ mod tests {
                 ..Default::default()
             })
             .await?
-            .id;
+            .uid;
 
         let user = db.get_user(params::GetUser { id: uid }).await?;
 
@@ -976,7 +796,7 @@ mod tests {
         const MILLISECONDS_IN_AN_HOUR: i64 = MILLISECONDS_IN_A_MINUTE * 60;
 
         let pool = db_pool().await?;
-        let db = pool.get().await?;
+        let mut db = pool.get().await?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1012,7 +832,7 @@ mod tests {
                     ..Default::default()
                 })
                 .await?
-                .id;
+                .uid;
 
             db.set_user_created_at(params::SetUserCreatedAt {
                 created_at: an_hour_ago,
@@ -1034,7 +854,7 @@ mod tests {
                     ..Default::default()
                 })
                 .await?
-                .id;
+                .uid;
 
             db.set_user_replaced_at(params::SetUserReplacedAt {
                 replaced_at: an_hour_ago + MILLISECONDS_IN_A_MINUTE,
@@ -1061,7 +881,7 @@ mod tests {
                     ..Default::default()
                 })
                 .await?
-                .id;
+                .uid;
 
             db.set_user_created_at(params::SetUserCreatedAt {
                 created_at: now + MILLISECONDS_IN_AN_HOUR,
@@ -1082,7 +902,7 @@ mod tests {
                     ..Default::default()
                 })
                 .await?
-                .id;
+                .uid;
 
             db.set_user_created_at(params::SetUserCreatedAt {
                 created_at: an_hour_ago,
@@ -1101,7 +921,7 @@ mod tests {
                     ..Default::default()
                 })
                 .await?
-                .id;
+                .uid;
 
             // Set created_at to be an hour ago
             db.set_user_created_at(params::SetUserCreatedAt {
@@ -1157,7 +977,7 @@ mod tests {
     #[tokio::test]
     async fn post_user() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -1186,7 +1006,7 @@ mod tests {
             node_id,
             keys_changed_at: Some(3),
         };
-        let uid1 = db.post_user(post_user_params1.clone()).await?.id;
+        let uid1 = db.post_user(post_user_params1.clone()).await?.uid;
 
         // Add another user
         let email2 = "test_user_2";
@@ -1196,7 +1016,7 @@ mod tests {
             email: email2.to_owned(),
             ..Default::default()
         };
-        let uid2 = db.post_user(post_user_params2).await?.id;
+        let uid2 = db.post_user(post_user_params2).await?.uid;
 
         // Ensure that two separate users were created
         assert_ne!(uid1, uid2);
@@ -1223,7 +1043,7 @@ mod tests {
     #[tokio::test]
     async fn get_node_id() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -1270,7 +1090,7 @@ mod tests {
     #[tokio::test]
     async fn test_node_allocation() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get_tokenserver_db().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -1295,14 +1115,16 @@ mod tests {
             .id;
 
         // Allocating a user assigns it to the node
-        let user = db.allocate_user_sync(params::AllocateUser {
-            service_id,
-            generation: 1234,
-            email: "test@test.com".to_owned(),
-            client_state: "aaaa".to_owned(),
-            keys_changed_at: Some(1234),
-            capacity_release_rate: None,
-        })?;
+        let user = db
+            .allocate_user(params::AllocateUser {
+                service_id,
+                generation: 1234,
+                email: "test@test.com".to_owned(),
+                client_state: "aaaa".to_owned(),
+                keys_changed_at: Some(1234),
+                capacity_release_rate: None,
+            })
+            .await?;
         assert_eq!(user.node, "https://node1");
 
         // Getting the user from the database does not affect node assignment
@@ -1315,7 +1137,7 @@ mod tests {
     #[tokio::test]
     async fn test_allocation_to_least_loaded_node() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get_tokenserver_db().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -1348,23 +1170,27 @@ mod tests {
         .await?;
 
         // Allocate two users
-        let user1 = db.allocate_user_sync(params::AllocateUser {
-            service_id,
-            generation: 1234,
-            email: "test1@test.com".to_owned(),
-            client_state: "aaaa".to_owned(),
-            keys_changed_at: Some(1234),
-            capacity_release_rate: None,
-        })?;
+        let user1 = db
+            .allocate_user(params::AllocateUser {
+                service_id,
+                generation: 1234,
+                email: "test1@test.com".to_owned(),
+                client_state: "aaaa".to_owned(),
+                keys_changed_at: Some(1234),
+                capacity_release_rate: None,
+            })
+            .await?;
 
-        let user2 = db.allocate_user_sync(params::AllocateUser {
-            service_id,
-            generation: 1234,
-            email: "test2@test.com".to_owned(),
-            client_state: "aaaa".to_owned(),
-            keys_changed_at: Some(1234),
-            capacity_release_rate: None,
-        })?;
+        let user2 = db
+            .allocate_user(params::AllocateUser {
+                service_id,
+                generation: 1234,
+                email: "test2@test.com".to_owned(),
+                client_state: "aaaa".to_owned(),
+                keys_changed_at: Some(1234),
+                capacity_release_rate: None,
+            })
+            .await?;
 
         // Because users are always assigned to the least-loaded node, the users should have been
         // assigned to different nodes
@@ -1376,7 +1202,7 @@ mod tests {
     #[tokio::test]
     async fn test_allocation_is_not_allowed_to_downed_nodes() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get_tokenserver_db().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -1400,14 +1226,16 @@ mod tests {
         .await?;
 
         // User allocation fails because allocation is not allowed to downed nodes
-        let result = db.allocate_user_sync(params::AllocateUser {
-            service_id,
-            generation: 1234,
-            email: "test@test.com".to_owned(),
-            client_state: "aaaa".to_owned(),
-            keys_changed_at: Some(1234),
-            capacity_release_rate: None,
-        });
+        let result = db
+            .allocate_user(params::AllocateUser {
+                service_id,
+                generation: 1234,
+                email: "test@test.com".to_owned(),
+                client_state: "aaaa".to_owned(),
+                keys_changed_at: Some(1234),
+                capacity_release_rate: None,
+            })
+            .await;
         let error = result.unwrap_err();
         assert_eq!(error.to_string(), "Unexpected error: unable to get a node");
 
@@ -1417,7 +1245,7 @@ mod tests {
     #[tokio::test]
     async fn test_allocation_is_not_allowed_to_backoff_nodes() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get_tokenserver_db().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -1441,14 +1269,16 @@ mod tests {
         .await?;
 
         // User allocation fails because allocation is not allowed to backoff nodes
-        let result = db.allocate_user_sync(params::AllocateUser {
-            service_id,
-            generation: 1234,
-            email: "test@test.com".to_owned(),
-            client_state: "aaaa".to_owned(),
-            keys_changed_at: Some(1234),
-            capacity_release_rate: None,
-        });
+        let result = db
+            .allocate_user(params::AllocateUser {
+                service_id,
+                generation: 1234,
+                email: "test@test.com".to_owned(),
+                client_state: "aaaa".to_owned(),
+                keys_changed_at: Some(1234),
+                capacity_release_rate: None,
+            })
+            .await;
         let error = result.unwrap_err();
         assert_eq!(error.to_string(), "Unexpected error: unable to get a node");
 
@@ -1458,7 +1288,7 @@ mod tests {
     #[tokio::test]
     async fn test_node_reassignment_when_records_are_replaced() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get_tokenserver_db().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -1481,14 +1311,16 @@ mod tests {
         .await?;
 
         // Allocate a user
-        let allocate_user_result = db.allocate_user_sync(params::AllocateUser {
-            service_id,
-            generation: 1234,
-            email: "test@test.com".to_owned(),
-            client_state: "aaaa".to_owned(),
-            keys_changed_at: Some(1234),
-            capacity_release_rate: None,
-        })?;
+        let allocate_user_result = db
+            .allocate_user(params::AllocateUser {
+                service_id,
+                generation: 1234,
+                email: "test@test.com".to_owned(),
+                client_state: "aaaa".to_owned(),
+                keys_changed_at: Some(1234),
+                capacity_release_rate: None,
+            })
+            .await?;
         let user1 = db
             .get_user(params::GetUser {
                 id: allocate_user_result.uid,
@@ -1530,7 +1362,7 @@ mod tests {
     #[tokio::test]
     async fn test_node_reassignment_not_done_for_retired_users() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -1586,7 +1418,7 @@ mod tests {
     #[tokio::test]
     async fn test_node_reassignment_and_removal() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -1737,7 +1569,7 @@ mod tests {
     #[tokio::test]
     async fn test_gradual_release_of_node_capacity() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -1903,7 +1735,7 @@ mod tests {
     #[tokio::test]
     async fn test_correct_created_at_used_during_node_reassignment() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -1967,7 +1799,7 @@ mod tests {
     #[tokio::test]
     async fn test_correct_created_at_used_during_user_retrieval() -> DbResult<()> {
         let pool = db_pool().await?;
-        let db = pool.get().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -2026,7 +1858,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_spanner_node() -> DbResult<()> {
         let pool = db_pool().await?;
-        let mut db = pool.get_tokenserver_db().await?;
+        let mut db = pool.get().await?;
 
         // Add a service
         let service_id = db
@@ -2074,7 +1906,7 @@ mod tests {
         );
 
         // Ensure the Spanner node is selected if the Spanner node ID is cached
-        db.spanner_node_id = Some(spanner_node_id as i32);
+        db.set_spanner_node_id(Some(spanner_node_id as i32));
 
         assert_eq!(
             db.get_best_node(params::GetBestNode {
@@ -2089,20 +1921,27 @@ mod tests {
         Ok(())
     }
 
-    async fn db_pool() -> DbResult<TokenserverPool> {
+    #[tokio::test]
+    async fn heartbeat() -> Result<(), DbError> {
+        let pool = db_pool().await?;
+        let mut db = pool.get().await?;
+        assert!(db.check().await?);
+        Ok(())
+    }
+
+    async fn db_pool() -> DbResult<Box<dyn DbPool>> {
         let _ = env_logger::try_init();
 
         let mut settings = Settings::test_settings();
         settings.tokenserver.run_migrations = true;
         let use_test_transactions = true;
 
-        TokenserverPool::new(
+        let mut pool = pool_from_settings(
             &settings.tokenserver,
             &Metrics::noop(),
-            Arc::new(BlockingThreadpool::new(
-                settings.worker_max_blocking_threads,
-            )),
             use_test_transactions,
-        )
+        )?;
+        pool.init().await?;
+        Ok(pool)
     }
 }
